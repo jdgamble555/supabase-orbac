@@ -1,0 +1,8 @@
+{
+  "chat.tools.terminal.enableAutoApprove": true,
+  "chat.tools.terminal.ignoreDefaultAutoApproveRules": true,
+  "chat.tools.terminal.autoApprove": {
+    "/^npm\\s+run\\s+reset$/": true,
+    "/.*/": false
+  }
+}

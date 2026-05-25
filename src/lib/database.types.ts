@@ -202,6 +202,11 @@ export type Database = {
     }
     Functions: {
       build_claims_cache: { Args: { target_user_id: string }; Returns: Json }
+      create_tenant: { Args: { target_tenant_name: string }; Returns: string }
+      get_user_permissions: {
+        Args: { permissions: string[] }
+        Returns: string[]
+      }
       refresh_user_claims_cache: {
         Args: { target_user_id: string }
         Returns: undefined

@@ -33,18 +33,24 @@ create table rbac.roles (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
 
-  constraint roles_global_name_uq unique nulls not distinct (tenant_id, role_name)
+  constraint roles_tenant_name_uq
+    unique nulls not distinct (tenant_id, role_name)
 );
 
 create table rbac.members (
   member_id uuid primary key default gen_random_uuid(),
-  -- `null` means a global assignment. A non-null tenant_id scopes membership to one tenant.
+
+  -- null = global membership
+  -- non-null = tenant membership
   tenant_id uuid references rbac.tenants(tenant_id) on delete cascade,
+
   user_id uuid not null references auth.users(id) on delete cascade,
   role_id uuid not null references rbac.roles(role_id) on delete cascade,
+
   created_at timestamptz not null default now(),
 
-  constraint members_tenant_user_uq unique nulls not distinct (tenant_id, user_id)
+  constraint members_tenant_user_uq
+    unique nulls not distinct (tenant_id, user_id)
 );
 
 create table rbac.permissions (
@@ -87,7 +93,6 @@ on rbac.members (role_id);
 
 create index role_permissions_permission_idx
 on rbac.role_permissions (permission_id);
-
 
 
 -- ---------------------------------------------------------------------------
@@ -362,8 +367,6 @@ for each row
 execute function rbac.handle_permissions_claims_cache();
 
 
-
-
 -- ---------------------------------------------------------------------------
 -- Private RLS predicate helpers
 -- ---------------------------------------------------------------------------
@@ -420,6 +423,153 @@ as $$
   );
 $$;
 
+create or replace function rbac.get_user_permissions(
+  permissions text[]
+)
+returns text[]
+language sql
+stable
+security invoker
+set search_path = ''
+as $$
+  with requested_permissions as (
+    select distinct requested.permission_name
+    from unnest(coalesce(get_user_permissions.permissions, array[]::text[])) as requested(permission_name)
+    where requested.permission_name is not null
+  ),
+  user_permissions as (
+    select jsonb_array_elements_text(c.claims -> 'global' -> 'permissions') as permission_name
+    from rbac.user_claims c
+    where c.user_id = auth.uid()
+
+    union
+
+    select jsonb_array_elements_text(tenant_claim.value -> 'permissions') as permission_name
+    from rbac.user_claims c
+    cross join lateral jsonb_each(c.claims -> 'tenants') as tenant_claim(key, value)
+    where c.user_id = auth.uid()
+  )
+  select coalesce(
+    array_agg(requested_permissions.permission_name order by requested_permissions.permission_name),
+    array[]::text[]
+  )
+  from requested_permissions
+  where requested_permissions.permission_name in (
+    select distinct user_permissions.permission_name
+    from user_permissions
+  );
+$$;
+
+create or replace function private.bootstrap_tenant(
+  target_tenant_id uuid,
+  target_user_id uuid
+)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  admin_role_id uuid;
+  admin_permission_names text[] := array[
+    'rbac.tenants.select',
+    'rbac.tenants.update',
+    'rbac.tenants.delete',
+    'rbac.roles.select',
+    'rbac.roles.insert',
+    'rbac.roles.update',
+    'rbac.roles.delete',
+    'rbac.members.select',
+    'rbac.members.insert',
+    'rbac.members.update',
+    'rbac.members.delete',
+    'rbac.role_permissions.select',
+    'rbac.role_permissions.insert',
+    'rbac.role_permissions.update',
+    'rbac.role_permissions.delete'
+  ];
+  matched_permission_count integer;
+begin
+  if target_user_id is null then
+    raise exception 'target_user_id is required';
+  end if;
+
+  if target_tenant_id is null then
+    raise exception 'target_tenant_id is required';
+  end if;
+
+  select count(*)
+  into matched_permission_count
+  from rbac.permissions p
+  where p.permission_name = any(admin_permission_names);
+
+  if matched_permission_count <> array_length(admin_permission_names, 1) then
+    raise exception 'Missing required RBAC permissions for tenant admin role';
+  end if;
+
+  insert into rbac.roles (
+    tenant_id,
+    role_name,
+    role_description,
+    is_system
+  )
+  values (
+    target_tenant_id,
+    'admin',
+    'Tenant administrator role created during tenant bootstrap.',
+    true
+  )
+  returning role_id into admin_role_id;
+
+  insert into rbac.role_permissions (role_id, permission_id)
+  select
+    admin_role_id,
+    p.permission_id
+  from rbac.permissions p
+  where p.permission_name = any(admin_permission_names);
+
+  insert into rbac.members (
+    tenant_id,
+    user_id,
+    role_id
+  )
+  values (
+    target_tenant_id,
+    target_user_id,
+    admin_role_id
+  );
+end;
+$$;
+
+create or replace function rbac.create_tenant(
+  target_tenant_name text
+)
+returns uuid
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+declare
+  created_tenant_id uuid := gen_random_uuid();
+  current_user_id uuid := auth.uid();
+begin
+  if target_tenant_name is null or length(trim(target_tenant_name)) = 0 then
+    raise exception 'target_tenant_name is required';
+  end if;
+
+  if current_user_id is null then
+    raise exception 'auth.uid() is required';
+  end if;
+
+  insert into rbac.tenants (tenant_id, tenant_name)
+  values (created_tenant_id, trim(target_tenant_name));
+
+  perform private.bootstrap_tenant(created_tenant_id, current_user_id);
+
+  return created_tenant_id;
+end;
+$$;
+
 
 -- ---------------------------------------------------------------------------
 -- Grants and default privileges
@@ -446,6 +596,18 @@ grant execute
 on function private.has_role_permission(uuid, text, uuid)
 to anon, authenticated, service_role;
 
+grant execute
+on function rbac.get_user_permissions(text[])
+to anon, authenticated, service_role;
+
+grant execute
+on function private.bootstrap_tenant(uuid, uuid)
+to authenticated;
+
+grant execute
+on function rbac.create_tenant(text)
+to authenticated;
+
 alter default privileges in schema rbac
 grant select, insert, update, delete
 on tables
@@ -470,3 +632,171 @@ alter default privileges in schema private
 revoke execute
 on functions
 from anon, authenticated, service_role;
+
+
+-- ---------------------------------------------------------------------------
+-- Row Level Security
+-- ---------------------------------------------------------------------------
+alter table rbac.tenants enable row level security;
+alter table rbac.roles enable row level security;
+alter table rbac.members enable row level security;
+alter table rbac.permissions enable row level security;
+alter table rbac.role_permissions enable row level security;
+alter table rbac.user_claims enable row level security;
+
+
+-- ---------------------------------------------------------------------------
+-- Tenant policies
+-- ---------------------------------------------------------------------------
+create policy "tenants_select"
+on rbac.tenants
+for select
+using ((select private.has_permission(tenant_id, 'rbac.tenants.select')));
+
+create policy "tenants_insert"
+on rbac.tenants
+for insert
+with check (
+  auth.role() = 'service_role'
+  or auth.uid() is not null
+);
+
+create policy "tenants_update"
+on rbac.tenants
+for update
+using ((select private.has_permission(tenant_id, 'rbac.tenants.update')))
+with check ((select private.has_permission(tenant_id, 'rbac.tenants.update')));
+
+create policy "tenants_delete"
+on rbac.tenants
+for delete
+using ((select private.has_permission(tenant_id, 'rbac.tenants.delete')));
+
+
+-- ---------------------------------------------------------------------------
+-- Role policies
+-- ---------------------------------------------------------------------------
+create policy "roles_select"
+on rbac.roles
+for select
+using ((select private.has_permission(tenant_id, 'rbac.roles.select')));
+
+create policy "roles_insert"
+on rbac.roles
+for insert
+with check ((select private.has_permission(tenant_id, 'rbac.roles.insert')));
+
+create policy "roles_update"
+on rbac.roles
+for update
+using ((select private.has_permission(tenant_id, 'rbac.roles.update')))
+with check ((select private.has_permission(tenant_id, 'rbac.roles.update')));
+
+create policy "roles_delete"
+on rbac.roles
+for delete
+using ((select private.has_permission(tenant_id, 'rbac.roles.delete')));
+
+
+-- ---------------------------------------------------------------------------
+-- Membership policies
+-- ---------------------------------------------------------------------------
+create policy "members_select"
+on rbac.members
+for select
+using ((select private.has_permission(tenant_id, 'rbac.members.select')));
+
+create policy "members_insert"
+on rbac.members
+for insert
+with check ((select private.has_permission(tenant_id, 'rbac.members.insert')));
+
+create policy "members_update"
+on rbac.members
+for update
+using ((select private.has_permission(tenant_id, 'rbac.members.update')))
+with check ((select private.has_permission(tenant_id, 'rbac.members.update')));
+
+create policy "members_delete"
+on rbac.members
+for delete
+using ((select private.has_permission(tenant_id, 'rbac.members.delete')));
+
+
+-- ---------------------------------------------------------------------------
+-- Permission catalog policies
+-- ---------------------------------------------------------------------------
+create policy "permissions_select"
+on rbac.permissions
+for select
+using ((select private.has_permission(null, 'rbac.permissions.select')));
+
+create policy "permissions_insert"
+on rbac.permissions
+for insert
+with check ((select private.has_permission(null, 'rbac.permissions.insert')));
+
+create policy "permissions_update"
+on rbac.permissions
+for update
+using ((select private.has_permission(null, 'rbac.permissions.update')))
+with check ((select private.has_permission(null, 'rbac.permissions.update')));
+
+create policy "permissions_delete"
+on rbac.permissions
+for delete
+using ((select private.has_permission(null, 'rbac.permissions.delete')));
+
+
+-- ---------------------------------------------------------------------------
+-- Role-permission policies
+-- ---------------------------------------------------------------------------
+create policy "role_permissions_select"
+on rbac.role_permissions
+for select
+using ((select private.has_role_permission(role_id, 'rbac.role_permissions.select')));
+
+create policy "role_permissions_insert"
+on rbac.role_permissions
+for insert
+with check ((select private.has_role_permission(role_id, 'rbac.role_permissions.insert')));
+
+create policy "role_permissions_update"
+on rbac.role_permissions
+for update
+using ((select private.has_role_permission(role_id, 'rbac.role_permissions.update')))
+with check ((select private.has_role_permission(role_id, 'rbac.role_permissions.update')));
+
+create policy "role_permissions_delete"
+on rbac.role_permissions
+for delete
+using ((select private.has_role_permission(role_id, 'rbac.role_permissions.delete')));
+
+
+-- ---------------------------------------------------------------------------
+-- Claims cache policies
+-- ---------------------------------------------------------------------------
+create policy "user_claims_select"
+on rbac.user_claims
+for select
+using (
+  user_id = auth.uid()
+  or (select private.has_permission(null, 'rbac.user_claims.select'))
+);
+
+create policy "user_claims_insert"
+on rbac.user_claims
+for insert
+with check (auth.role() = 'service_role');
+
+create policy "user_claims_update"
+on rbac.user_claims
+for update
+using (auth.role() = 'service_role')
+with check (auth.role() = 'service_role');
+
+create policy "user_claims_delete"
+on rbac.user_claims
+for delete
+using (auth.role() = 'service_role');
+
