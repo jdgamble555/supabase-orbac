@@ -7,31 +7,6 @@ export type Json =
   | Json[]
 
 export type Database = {
-  graphql_public: {
-    Tables: {
-      [_ in never]: never
-    }
-    Views: {
-      [_ in never]: never
-    }
-    Functions: {
-      graphql: {
-        Args: {
-          extensions?: Json
-          operationName?: string
-          query?: string
-          variables?: Json
-        }
-        Returns: Json
-      }
-    }
-    Enums: {
-      [_ in never]: never
-    }
-    CompositeTypes: {
-      [_ in never]: never
-    }
-  }
   public: {
     Tables: {
       [_ in never]: never
@@ -41,6 +16,200 @@ export type Database = {
     }
     Functions: {
       [_ in never]: never
+    }
+    Enums: {
+      [_ in never]: never
+    }
+    CompositeTypes: {
+      [_ in never]: never
+    }
+  }
+  rbac: {
+    Tables: {
+      members: {
+        Row: {
+          created_at: string
+          member_id: string
+          role_id: string
+          tenant_id: string | null
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          member_id?: string
+          role_id: string
+          tenant_id?: string | null
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          member_id?: string
+          role_id?: string
+          tenant_id?: string | null
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "members_role_id_fkey"
+            columns: ["role_id"]
+            isOneToOne: false
+            referencedRelation: "roles"
+            referencedColumns: ["role_id"]
+          },
+          {
+            foreignKeyName: "members_tenant_id_fkey"
+            columns: ["tenant_id"]
+            isOneToOne: false
+            referencedRelation: "tenants"
+            referencedColumns: ["tenant_id"]
+          },
+        ]
+      }
+      permissions: {
+        Row: {
+          created_at: string
+          permission_description: string | null
+          permission_id: string
+          permission_name: string
+        }
+        Insert: {
+          created_at?: string
+          permission_description?: string | null
+          permission_id?: string
+          permission_name: string
+        }
+        Update: {
+          created_at?: string
+          permission_description?: string | null
+          permission_id?: string
+          permission_name?: string
+        }
+        Relationships: []
+      }
+      role_permissions: {
+        Row: {
+          created_at: string
+          permission_id: string
+          role_id: string
+        }
+        Insert: {
+          created_at?: string
+          permission_id: string
+          role_id: string
+        }
+        Update: {
+          created_at?: string
+          permission_id?: string
+          role_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "role_permissions_permission_id_fkey"
+            columns: ["permission_id"]
+            isOneToOne: false
+            referencedRelation: "permissions"
+            referencedColumns: ["permission_id"]
+          },
+          {
+            foreignKeyName: "role_permissions_role_id_fkey"
+            columns: ["role_id"]
+            isOneToOne: false
+            referencedRelation: "roles"
+            referencedColumns: ["role_id"]
+          },
+        ]
+      }
+      roles: {
+        Row: {
+          created_at: string
+          is_system: boolean
+          role_description: string | null
+          role_id: string
+          role_name: string
+          tenant_id: string | null
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          is_system?: boolean
+          role_description?: string | null
+          role_id?: string
+          role_name: string
+          tenant_id?: string | null
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          is_system?: boolean
+          role_description?: string | null
+          role_id?: string
+          role_name?: string
+          tenant_id?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "roles_tenant_id_fkey"
+            columns: ["tenant_id"]
+            isOneToOne: false
+            referencedRelation: "tenants"
+            referencedColumns: ["tenant_id"]
+          },
+        ]
+      }
+      tenants: {
+        Row: {
+          created_at: string
+          tenant_id: string
+          tenant_name: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          tenant_id?: string
+          tenant_name: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          tenant_id?: string
+          tenant_name?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      user_claims: {
+        Row: {
+          claims: Json
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          claims?: Json
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          claims?: Json
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+    }
+    Views: {
+      [_ in never]: never
+    }
+    Functions: {
+      build_claims_cache: { Args: { target_user_id: string }; Returns: Json }
+      refresh_user_claims_cache: {
+        Args: { target_user_id: string }
+        Returns: undefined
+      }
+      refresh_user_claims_cache_for_users: {
+        Args: { target_user_ids: string[] }
+        Returns: undefined
+      }
     }
     Enums: {
       [_ in never]: never
@@ -169,10 +338,10 @@ export type CompositeTypes<
     : never
 
 export const Constants = {
-  graphql_public: {
+  public: {
     Enums: {},
   },
-  public: {
+  rbac: {
     Enums: {},
   },
 } as const
